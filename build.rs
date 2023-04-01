@@ -15,19 +15,23 @@ fn sdk_include_path_for(sdk: &str) -> String {
 
     let inc_path = Path::new(String::from_utf8_lossy(&output.stdout).trim()).join("usr/include");
 
-    return inc_path.to_str().expect("invalid include path").to_string();
+    inc_path.to_str().expect("invalid include path").to_string()
 }
 
-fn sdk_include_path() -> String {
+fn sdk_include_path() -> Option<String> {
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-
-    if os == "ios" {
-        return sdk_include_path_for("iphoneos");
-    } else if os == "macos" {
-        return sdk_include_path_for("macosx");
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    match os.as_str() {
+        "ios" => {
+            if arch == "x86_64" {
+                Some(sdk_include_path_for("iphonesimulator"))
+            } else {
+                Some(sdk_include_path_for("iphoneos"))
+            }
+        }
+        "macos" => Some(sdk_include_path_for("macosx")),
+        _ => None,
     }
-
-    return "".to_string();
 }
 
 fn compile_lwip() {
@@ -73,10 +77,8 @@ fn compile_lwip() {
         .include("src/lwip/include")
         .warnings(false)
         .flag_if_supported("-Wno-everything");
-
-    let sdk_inc_path = sdk_include_path();
-    if !sdk_inc_path.is_empty() {
-        build.include(sdk_inc_path);
+    if let Some(sdk_include_path) = sdk_include_path() {
+        build.include(sdk_include_path);
     }
     build.compile("liblwip.a");
 }
@@ -95,18 +97,16 @@ fn generate_lwip_bindings() {
         .clang_arg("-I./src/lwip/include")
         .clang_arg("-I./src/lwip/custom")
         .clang_arg("-Wno-everything")
-        .layout_tests(false);
+        .layout_tests(false)
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks));
     if arch == "aarch64" && os == "ios" {
         // https://github.com/rust-lang/rust-bindgen/issues/1211
         builder = builder.clang_arg("--target=arm64-apple-ios");
     }
-    if !sdk_include_path.is_empty() {
+    if let Some(sdk_include_path) = sdk_include_path {
         builder = builder.clang_arg(format!("-I{}", sdk_include_path));
     }
-    let bindings = builder
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks))
-        .generate()
-        .expect("Unable to generate bindings");
+    let bindings = builder.generate().expect("Unable to generate bindings");
 
     let mut out_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     out_path = out_path.join("src");
