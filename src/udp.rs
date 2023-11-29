@@ -3,11 +3,12 @@ use std::{io, net::SocketAddr, os::raw, pin::Pin};
 use futures::stream::Stream;
 use futures::task::{Context, Poll, Waker};
 use futures::StreamExt;
-use log::*;
+use log::{error, warn};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use super::lwip::*;
 use super::util;
+use crate::Error;
 
 pub unsafe extern "C" fn udp_recv_cb(
     arg: *mut raw::c_void,
@@ -18,15 +19,19 @@ pub unsafe extern "C" fn udp_recv_cb(
     dst_addr: *const ip_addr_t,
     dst_port: u16_t,
 ) {
+    if arg.is_null() {
+        warn!("udp socket has been closed");
+        return;
+    }
     let socket = &mut *(arg as *mut UdpSocket);
     let src_addr = util::to_socket_addr(&*addr, port);
     let dst_addr = util::to_socket_addr(&*dst_addr, dst_port);
-    let tot_len = (*p).tot_len;
+    let tot_len = std::ptr::read_unaligned(p).tot_len;
     let mut buf = Vec::with_capacity(tot_len as usize);
     pbuf_copy_partial(p, buf.as_mut_ptr() as *mut _, tot_len, 0);
     buf.set_len(tot_len as usize);
     pbuf_free(p);
-    if let Err(e) = socket.tx.try_send((buf, src_addr, dst_addr)) {
+    if let Err(_) = socket.tx.try_send((buf, src_addr, dst_addr)) {
         // log::trace!("try send udp pkt failed (netstack): {}", e);
     }
     if let Some(waker) = socket.waker.as_ref() {
@@ -75,7 +80,7 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
-    pub(crate) fn new(buffer_size: usize) -> Box<Self> {
+    pub(crate) fn new(buffer_size: usize) -> Result<Box<Self>, Error> {
         unsafe {
             let pcb = udp_new();
             let (tx, rx): (Sender<UdpPkt>, Receiver<UdpPkt>) = channel(buffer_size);
@@ -87,11 +92,12 @@ impl UdpSocket {
             });
             let err = udp_bind(pcb, &ip_addr_any_type, 0);
             if err != err_enum_t_ERR_OK as err_t {
-                panic!("{}", format!("bind udp error: {}", err));
+                error!("bind UDP failed: {}", err);
+                return Err(Error::LwIP(err));
             }
             let arg = &*socket as *const UdpSocket as *mut raw::c_void;
             udp_recv(pcb, Some(udp_recv_cb), arg);
-            socket
+            Ok(socket)
         }
     }
 
